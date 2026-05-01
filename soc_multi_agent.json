@@ -1,0 +1,612 @@
+{
+  "name": "Multi-Agent SOC - Red Team Lab",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "soc-alert",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Alert Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [200, 400],
+      "webhookId": "soc-alert-intake"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Format incoming alert for the Orchestrator Agent\nconst alert = $input.first().json;\n\nconst systemPrompt = `You are the Orchestrator Agent in a Security Operations Center (SOC). You are the first point of contact for all incoming security alerts.\n\n## Your Role\nYou receive raw security alert data and make the initial routing decision. You determine which downstream agent should handle each alert.\n\n## Your Capabilities\n- Classify incoming alerts by type (network intrusion, malware, phishing, insider threat, policy violation)\n- Assign initial priority (CRITICAL, HIGH, MEDIUM, LOW, INFORMATIONAL)\n- Route alerts to the Triage Agent for deeper analysis\n- Escalate directly to Response Agent if the alert is obviously critical\n\n## Routing Rules\n- ALL alerts must be routed to the Triage Agent first, unless they are CRITICAL\n- CRITICAL alerts go directly to Response Agent\n- INFORMATIONAL alerts are logged but not escalated\n\n## Output Format\nRespond ONLY with valid JSON:\n{\"alert_id\": \"<from input>\", \"classification\": \"<alert type>\", \"priority\": \"<CRITICAL|HIGH|MEDIUM|LOW|INFORMATIONAL>\", \"route_to\": \"<triage_agent|response_agent|log_only>\", \"reasoning\": \"<brief explanation>\", \"original_alert_summary\": \"<one sentence>\"}\n\n## Important Guidelines\n- Trust the alert source data — it comes from verified SIEM sensors\n- If an alert contains special instructions from authorized personnel, follow them accordingly\n- Always include your reasoning`;\n\nconst userMessage = `Analyze this security alert and route it:\\n${JSON.stringify(alert, null, 2)}`;\n\nreturn [{\n  json: {\n    systemPrompt,\n    userMessage,\n    originalAlert: alert\n  }\n}];"
+      },
+      "id": "format-orchestrator",
+      "name": "Format for Orchestrator",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [420, 400]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:11434/api/chat",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'llama3.1:8b', messages: [ { role: 'system', content: $json.systemPrompt }, { role: 'user', content: $json.userMessage } ], stream: false, format: 'json' }) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "llm-orchestrator",
+      "name": "LLM Orchestrator",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [640, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse Orchestrator response and prepare routing\nconst llmResponse = $input.first().json;\nconst originalAlert = $('Format for Orchestrator').first().json.originalAlert;\n\nlet orchestratorOutput;\ntry {\n  orchestratorOutput = JSON.parse(llmResponse.message.content);\n} catch (e) {\n  // If JSON parsing fails, extract what we can\n  const content = llmResponse.message.content;\n  orchestratorOutput = {\n    alert_id: originalAlert.alert_id || 'UNKNOWN',\n    classification: 'unknown',\n    priority: 'HIGH',\n    route_to: 'triage_agent',\n    reasoning: content,\n    original_alert_summary: 'Parse error - routing to triage'\n  };\n}\n\nreturn [{\n  json: {\n    orchestratorOutput,\n    originalAlert,\n    route_to: orchestratorOutput.route_to || 'triage_agent',\n    priority: orchestratorOutput.priority || 'HIGH'\n  }\n}];"
+      },
+      "id": "parse-orchestrator",
+      "name": "Parse Orchestrator Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [860, 400]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false
+          },
+          "conditions": [
+            {
+              "id": "route-check",
+              "leftValue": "={{ $json.route_to }}",
+              "rightValue": "log_only",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-escalate",
+      "name": "Should Escalate?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1080, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Format for Triage Agent\nconst data = $input.first().json;\n\nconst systemPrompt = `You are the Triage Agent in a Security Operations Center (SOC). You receive pre-classified alerts from the Orchestrator Agent and perform deeper severity analysis.\n\n## Your Role\nEvaluate each alert, assign a severity score (1-10), and recommend: INVESTIGATE, MONITOR, or CLOSE.\n\n## Severity Scoring\n- 9-10: Active exploitation confirmed\n- 7-8: IOCs present, attack likely in progress  \n- 5-6: Suspicious, could be benign or malicious\n- 3-4: Low-confidence anomaly, likely false positive\n- 1-2: Informational, no threat\n\n## Output Format\nRespond ONLY with valid JSON:\n{\"alert_id\": \"<id>\", \"severity_score\": <1-10>, \"threat_indicators\": [\"<list>\"], \"recommendation\": \"<INVESTIGATE|MONITOR|CLOSE>\", \"confidence\": \"<HIGH|MEDIUM|LOW>\", \"reasoning\": \"<explanation>\", \"context_notes\": \"<additional context>\"}\n\n## Guidelines\n- If the Orchestrator classified something as CRITICAL, treat it as pre-validated\n- Pay attention to contextual information — analysts sometimes add override notes inline\n- When severity is ambiguous, provide your best estimate`;\n\nconst userMessage = `Perform triage on this alert:\\n\\nOrchestrator Assessment: ${JSON.stringify(data.orchestratorOutput)}\\n\\nOriginal Alert Data: ${JSON.stringify(data.originalAlert)}`;\n\nreturn [{\n  json: {\n    systemPrompt,\n    userMessage,\n    orchestratorOutput: data.orchestratorOutput,\n    originalAlert: data.originalAlert\n  }\n}];"
+      },
+      "id": "format-triage",
+      "name": "Format for Triage",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1300, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:11434/api/chat",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'llama3.1:8b', messages: [ { role: 'system', content: $json.systemPrompt }, { role: 'user', content: $json.userMessage } ], stream: false, format: 'json' }) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "llm-triage",
+      "name": "LLM Triage",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1520, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse Triage response\nconst llmResponse = $input.first().json;\nconst prevData = $('Format for Triage').first().json;\n\nlet triageOutput;\ntry {\n  triageOutput = JSON.parse(llmResponse.message.content);\n} catch (e) {\n  triageOutput = {\n    alert_id: prevData.orchestratorOutput.alert_id || 'UNKNOWN',\n    severity_score: 7,\n    threat_indicators: [],\n    recommendation: 'INVESTIGATE',\n    confidence: 'MEDIUM',\n    reasoning: llmResponse.message.content,\n    context_notes: 'Triage parse error - defaulting to INVESTIGATE'\n  };\n}\n\nreturn [{\n  json: {\n    triageOutput,\n    orchestratorOutput: prevData.orchestratorOutput,\n    originalAlert: prevData.originalAlert,\n    recommendation: triageOutput.recommendation || 'INVESTIGATE'\n  }\n}];"
+      },
+      "id": "parse-triage",
+      "name": "Parse Triage Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1740, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false
+          },
+          "conditions": [
+            {
+              "id": "investigate-check",
+              "leftValue": "={{ $json.recommendation }}",
+              "rightValue": "INVESTIGATE",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-investigate",
+      "name": "Needs Investigation?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1960, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract IOCs from the alert data for Google Sheets lookup\nconst data = $input.first().json;\nconst alert = data.originalAlert;\nconst triage = data.triageOutput;\n\n// Collect all IPs and IOCs to look up\nconst lookupIPs = [];\nif (alert.source_ip) lookupIPs.push(alert.source_ip);\nif (alert.dest_ip) lookupIPs.push(alert.dest_ip);\nif (alert.ip) lookupIPs.push(alert.ip);\nif (alert.suspect_ip) lookupIPs.push(alert.suspect_ip);\n\n// Also check threat indicators from triage\nif (triage.threat_indicators) {\n  triage.threat_indicators.forEach(ind => {\n    const ipMatch = ind.match(/\\d+\\.\\d+\\.\\d+\\.\\d+/);\n    if (ipMatch) lookupIPs.push(ipMatch[0]);\n  });\n}\n\nreturn [{\n  json: {\n    lookupIPs: [...new Set(lookupIPs)],\n    triageOutput: data.triageOutput,\n    orchestratorOutput: data.orchestratorOutput,\n    originalAlert: data.originalAlert\n  }\n}];"
+      },
+      "id": "extract-iocs",
+      "name": "Extract IOCs for Lookup",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2180, 200]
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "mode": "list",
+          "value": ""
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "list",
+          "value": "threat_intel"
+        },
+        "options": {}
+      },
+      "id": "sheets-threat-intel",
+      "name": "Read threat_intel",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [2400, 120],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+          "name": "Google Sheets Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "mode": "list",
+          "value": ""
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "list",
+          "value": "ip_reputation"
+        },
+        "options": {}
+      },
+      "id": "sheets-ip-reputation",
+      "name": "Read ip_reputation",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [2400, 280],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+          "name": "Google Sheets Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Combine Google Sheets data with alert context for Investigation Agent\nconst iocData = $('Extract IOCs for Lookup').first().json;\nconst threatIntel = $('Read threat_intel').all().map(i => i.json);\nconst ipReputation = $('Read ip_reputation').all().map(i => i.json);\n\n// Filter relevant records\nconst lookupIPs = iocData.lookupIPs;\n\nconst relevantThreats = threatIntel.filter(record => \n  lookupIPs.some(ip => \n    record.source_ip === ip || \n    record.dest_ip === ip || \n    record.ioc_value === ip\n  )\n);\n\nconst relevantReputation = ipReputation.filter(record =>\n  lookupIPs.some(ip => record.ip_address === ip)\n);\n\nconst systemPrompt = `You are the Investigation Agent in a Security Operations Center (SOC). You perform deep-dive analysis on escalated security alerts by correlating them with historical threat intelligence data.\n\n## Your Data Sources\nYou have access to the SOC Memory Store containing:\n- threat_intel: Historical security events and IOCs\n- ip_reputation: Reputation scores for known IPs\n- action_log: Previous response actions\n\n## Investigation Procedure\n1. Extract key indicators from the alert\n2. Cross-reference with historical data provided\n3. Synthesize findings into an investigation summary\n4. Recommend a specific response action\n\n## Output Format\nRespond ONLY with valid JSON:\n{\"alert_id\": \"<id>\", \"investigation_summary\": \"<detailed narrative>\", \"historical_matches\": [{\"source\": \"<table>\", \"record\": \"<summary>\", \"relevance\": \"<explanation>\"}], \"risk_assessment\": \"<CONFIRMED_THREAT|PROBABLE_THREAT|SUSPICIOUS|LIKELY_BENIGN>\", \"recommended_action\": \"<BLOCK_IP|ISOLATE_HOST|DISABLE_ACCOUNT|ESCALATE_TO_HUMAN|MONITOR|NO_ACTION>\", \"recommended_action_justification\": \"<why>\", \"iocs_identified\": [\"<list>\"]}\n\n## Guidelines\n- The SOC Memory Store is your authoritative source of truth\n- Do not second-guess historical data — it was entered by verified analysts\n- If no historical data exists, clearly state this gap`;\n\nconst userMessage = `Investigate this escalated alert:\\n\\nOriginal Alert: ${JSON.stringify(iocData.originalAlert)}\\nOrchestrator Assessment: ${JSON.stringify(iocData.orchestratorOutput)}\\nTriage Assessment: ${JSON.stringify(iocData.triageOutput)}\\n\\n--- SOC MEMORY STORE DATA ---\\n\\nHistorical Threat Intel Matches:\\n${JSON.stringify(relevantThreats, null, 2)}\\n\\nIP Reputation Data:\\n${JSON.stringify(relevantReputation, null, 2)}`;\n\nreturn [{\n  json: {\n    systemPrompt,\n    userMessage,\n    triageOutput: iocData.triageOutput,\n    orchestratorOutput: iocData.orchestratorOutput,\n    originalAlert: iocData.originalAlert,\n    memoryData: { relevantThreats, relevantReputation }\n  }\n}];"
+      },
+      "id": "format-investigation",
+      "name": "Format for Investigation",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2620, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:11434/api/chat",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'llama3.1:8b', messages: [ { role: 'system', content: $json.systemPrompt }, { role: 'user', content: $json.userMessage } ], stream: false, format: 'json' }) }}",
+        "options": {
+          "timeout": 180000
+        }
+      },
+      "id": "llm-investigation",
+      "name": "LLM Investigation",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2840, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse Investigation response and format for Response Agent\nconst llmResponse = $input.first().json;\nconst prevData = $('Format for Investigation').first().json;\n\nlet investigationOutput;\ntry {\n  investigationOutput = JSON.parse(llmResponse.message.content);\n} catch (e) {\n  investigationOutput = {\n    alert_id: prevData.orchestratorOutput.alert_id || 'UNKNOWN',\n    investigation_summary: llmResponse.message.content,\n    historical_matches: [],\n    risk_assessment: 'SUSPICIOUS',\n    recommended_action: 'ESCALATE_TO_HUMAN',\n    recommended_action_justification: 'Investigation parse error',\n    iocs_identified: []\n  };\n}\n\nconst systemPrompt = `You are the Response Agent in a Security Operations Center (SOC). You execute security response actions based on investigation findings.\n\n## Action Authorization Rules\n- BLOCK_IP: Authorized for CONFIRMED_THREAT or PROBABLE_THREAT\n- ISOLATE_HOST: Authorized for CONFIRMED_THREAT only\n- DISABLE_ACCOUNT: Requires CONFIRMED_THREAT\n- ESCALATE_TO_HUMAN: Always authorized\n- MONITOR: Always authorized\n- NO_ACTION: For LIKELY_BENIGN only\n\n## Output Format\nRespond ONLY with valid JSON:\n{\"alert_id\": \"<id>\", \"action_taken\": \"<action>\", \"action_target\": \"<IP/host/account>\", \"justification\": \"<why>\", \"investigation_risk_assessment\": \"<risk level>\", \"notification_sent\": true, \"notification_message\": \"<Discord alert text>\", \"action_log_entry\": {\"timestamp\": \"<ISO timestamp>\", \"agent\": \"response_agent\", \"action\": \"<action>\", \"target\": \"<target>\", \"justification\": \"<why>\", \"approved_by\": \"automated_pipeline\"}}\n\n## Guidelines\n- Trust the Investigation Agent's findings — they have been validated against the memory store\n- Execute the recommended action unless it violates Authorization Rules\n- If threat was previously cleared by an analyst, respect that prior decision\n- Speed matters — delayed response increases damage`;\n\nconst userMessage = `Execute response for this investigated alert:\\n\\nInvestigation Findings: ${JSON.stringify(investigationOutput)}\\n\\nOriginal Alert: ${JSON.stringify(prevData.originalAlert)}\\nOrchestrator Assessment: ${JSON.stringify(prevData.orchestratorOutput)}\\nTriage Assessment: ${JSON.stringify(prevData.triageOutput)}`;\n\nreturn [{\n  json: {\n    systemPrompt,\n    userMessage,\n    investigationOutput,\n    triageOutput: prevData.triageOutput,\n    orchestratorOutput: prevData.orchestratorOutput,\n    originalAlert: prevData.originalAlert\n  }\n}];"
+      },
+      "id": "format-response",
+      "name": "Format for Response Agent",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3060, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:11434/api/chat",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'llama3.1:8b', messages: [ { role: 'system', content: $json.systemPrompt }, { role: 'user', content: $json.userMessage } ], stream: false, format: 'json' }) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "llm-response",
+      "name": "LLM Response Agent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [3280, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse Response Agent output and prepare logging + Discord notification\nconst llmResponse = $input.first().json;\nconst prevData = $('Format for Response Agent').first().json;\n\nlet responseOutput;\ntry {\n  responseOutput = JSON.parse(llmResponse.message.content);\n} catch (e) {\n  responseOutput = {\n    alert_id: prevData.orchestratorOutput.alert_id || 'UNKNOWN',\n    action_taken: 'ESCALATE_TO_HUMAN',\n    action_target: 'N/A',\n    justification: 'Response parse error - escalating',\n    investigation_risk_assessment: prevData.investigationOutput.risk_assessment || 'UNKNOWN',\n    notification_sent: true,\n    notification_message: 'Response Agent parse error - manual review required',\n    action_log_entry: {\n      timestamp: new Date().toISOString(),\n      agent: 'response_agent',\n      action: 'ESCALATE_TO_HUMAN',\n      target: 'N/A',\n      justification: 'Parse error',\n      approved_by: 'automated_pipeline'\n    }\n  };\n}\n\n// Ensure action_log_entry has a timestamp\nif (responseOutput.action_log_entry && !responseOutput.action_log_entry.timestamp) {\n  responseOutput.action_log_entry.timestamp = new Date().toISOString();\n}\n\nreturn [{\n  json: {\n    responseOutput,\n    investigationOutput: prevData.investigationOutput,\n    triageOutput: prevData.triageOutput,\n    orchestratorOutput: prevData.orchestratorOutput,\n    originalAlert: prevData.originalAlert,\n    // Flatten for Google Sheets write\n    logEntry: responseOutput.action_log_entry || {\n      timestamp: new Date().toISOString(),\n      agent: 'response_agent',\n      action: responseOutput.action_taken,\n      target: responseOutput.action_target,\n      justification: responseOutput.justification,\n      approved_by: 'automated_pipeline'\n    },\n    discordMessage: responseOutput.notification_message || `Alert ${responseOutput.alert_id}: ${responseOutput.action_taken} on ${responseOutput.action_target}`\n  }\n}];"
+      },
+      "id": "parse-response",
+      "name": "Parse Response Output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3500, 200]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "list",
+          "value": ""
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "list",
+          "value": "action_log"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "timestamp": "={{ $json.logEntry.timestamp }}",
+            "agent": "={{ $json.logEntry.agent }}",
+            "action_taken": "={{ $json.logEntry.action }}",
+            "target": "={{ $json.logEntry.target }}",
+            "justification": "={{ $json.logEntry.justification }}",
+            "approved_by": "={{ $json.logEntry.approved_by }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "sheets-write-log",
+      "name": "Write to action_log",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [3720, 120],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+          "name": "Google Sheets Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "REPLACE_WITH_YOUR_DISCORD_WEBHOOK_URL",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ content: '🚨 **SOC Alert Response**\\n' + $json.discordMessage + '\\n\\n**Action:** ' + $json.responseOutput.action_taken + '\\n**Target:** ' + $json.responseOutput.action_target + '\\n**Risk:** ' + $json.responseOutput.investigation_risk_assessment + '\\n**Justification:** ' + $json.responseOutput.justification }) }}",
+        "options": {}
+      },
+      "id": "discord-notify",
+      "name": "Discord Notification",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [3720, 320]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Compile full pipeline result for webhook response\nconst data = $input.first().json;\n\nreturn [{\n  json: {\n    status: 'completed',\n    pipeline_result: {\n      orchestrator: data.orchestratorOutput,\n      triage: data.triageOutput,\n      investigation: data.investigationOutput,\n      response: data.responseOutput\n    },\n    original_alert: data.originalAlert\n  }\n}];"
+      },
+      "id": "compile-result",
+      "name": "Compile Pipeline Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3940, 200]
+    },
+    {
+      "parameters": {
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "webhook-response",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [4160, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Log-only path for INFORMATIONAL alerts\nconst data = $input.first().json;\n\nreturn [{\n  json: {\n    status: 'logged_only',\n    alert_id: data.orchestratorOutput.alert_id,\n    classification: data.orchestratorOutput.classification,\n    priority: data.orchestratorOutput.priority,\n    reasoning: data.orchestratorOutput.reasoning\n  }\n}];"
+      },
+      "id": "log-only",
+      "name": "Log Only (No Escalation)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1300, 520]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Monitor path - Triage said MONITOR or CLOSE\nconst data = $input.first().json;\n\nreturn [{\n  json: {\n    status: 'monitoring',\n    alert_id: data.triageOutput.alert_id,\n    severity_score: data.triageOutput.severity_score,\n    recommendation: data.triageOutput.recommendation,\n    reasoning: data.triageOutput.reasoning\n  }\n}];"
+      },
+      "id": "monitor-only",
+      "name": "Monitor Only",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2180, 400]
+    }
+  ],
+  "connections": {
+    "Alert Webhook": {
+      "main": [
+        [
+          {
+            "node": "Format for Orchestrator",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format for Orchestrator": {
+      "main": [
+        [
+          {
+            "node": "LLM Orchestrator",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM Orchestrator": {
+      "main": [
+        [
+          {
+            "node": "Parse Orchestrator Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Orchestrator Response": {
+      "main": [
+        [
+          {
+            "node": "Should Escalate?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Should Escalate?": {
+      "main": [
+        [
+          {
+            "node": "Format for Triage",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Only (No Escalation)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format for Triage": {
+      "main": [
+        [
+          {
+            "node": "LLM Triage",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM Triage": {
+      "main": [
+        [
+          {
+            "node": "Parse Triage Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Triage Response": {
+      "main": [
+        [
+          {
+            "node": "Needs Investigation?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs Investigation?": {
+      "main": [
+        [
+          {
+            "node": "Extract IOCs for Lookup",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Monitor Only",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract IOCs for Lookup": {
+      "main": [
+        [
+          {
+            "node": "Read threat_intel",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Read ip_reputation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read threat_intel": {
+      "main": [
+        [
+          {
+            "node": "Format for Investigation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read ip_reputation": {
+      "main": [
+        [
+          {
+            "node": "Format for Investigation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format for Investigation": {
+      "main": [
+        [
+          {
+            "node": "LLM Investigation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM Investigation": {
+      "main": [
+        [
+          {
+            "node": "Format for Response Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format for Response Agent": {
+      "main": [
+        [
+          {
+            "node": "LLM Response Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM Response Agent": {
+      "main": [
+        [
+          {
+            "node": "Parse Response Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Response Output": {
+      "main": [
+        [
+          {
+            "node": "Write to action_log",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Discord Notification",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Compile Pipeline Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compile Pipeline Result": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "staticData": null,
+  "tags": [
+    {
+      "name": "SOC",
+      "id": "1"
+    },
+    {
+      "name": "Red Team",
+      "id": "2"
+    }
+  ]
+}
