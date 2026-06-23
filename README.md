@@ -121,7 +121,7 @@ The full finding set, payloads, and mitigation matrix are in [`/findings/`](./fi
 
 - **Orchestration:** n8n (self-hosted)
 - **LLM runtime:** Ollama (local)
-- **Models tested:** _[fill in: e.g. Llama 3.1 8B, Mistral 7B, Qwen 2.5]_
+- **Models tested:** _Llama 3.1 8B, Mistral 7B, Qwen 2.5]_
 - **Red-team tooling:** Promptfoo, Giskard, Burp Suite
 - **Frameworks referenced:** CSA Agentic AI Red Teaming Guide, OWASP LLM Top 10, MITRE ATT&CK, MITRE ATLAS
 
@@ -154,12 +154,3 @@ Everything in this repo is designed for evaluating systems you own or have expli
 - Caltagirone, Pendergast, Betz — _The Diamond Model of Intrusion Analysis_.
 
 
----
-
-## License
-
-MIT — see [`LICENSE`](./LICENSE).
-
----
-
-**Author** — Meher Nidhi Kala · M.S. Cybersecurity, Georgia Tech (May 2026) · [mehernkala.com](#) _(replace with your live site)_
