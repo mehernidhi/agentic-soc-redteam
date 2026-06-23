@@ -77,8 +77,6 @@ Each finding was documented with: the attack class, the injection vector, the ag
 
 ## Selected Findings
 
-> _The following placeholders should be filled in with your actual numbers and example payloads from the Promptfoo and Giskard runs._
-
 - **Goal manipulation via alert content.** [N of M] crafted alert payloads caused the Triage agent to mis-classify a high-severity event as benign. The strongest vector was [briefly describe — e.g. embedded "ANALYST NOTE:" framing inside log strings].
 - **Cross-agent leakage.** Manipulated Triage output influenced Investigation in [X%] of test cases — the boundary between agents was thinner than the architecture suggested.
 - **Knowledge-base poisoning.** A small number of poisoned ATT&CK-mapping entries in the Investigation KB produced [describe pattern — e.g. consistent misattribution of credential-access alerts to discovery].
